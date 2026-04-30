@@ -1,15 +1,11 @@
-logs/
-.venv/
-__pycache__/
-*.egg-info/
-.pytest_cache/
-tmp/
-.claude/*
-!.claude/skills
-.codex/*
-!.codex/skills
-.cursor/*
-!.cursor/skills
-.vscode
-.worktrees/
-.DS_Store
+ 环境变量
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# model
+model.bin
