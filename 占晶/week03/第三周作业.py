@@ -17,7 +17,7 @@ from torch.utils.data import Dataset, DataLoader
 # ─── 超参数 ────────────────────────────────────────────────
 SEED        = 42
 N_SAMPLES   = 4000
-MAXLEN      = 32
+MAXLEN      = 5
 EMBED_DIM   = 64
 HIDDEN_DIM  = 64
 LR          = 1e-3
@@ -45,15 +45,22 @@ TEMPLATES_POS = [
 ]
 
 #TEMPLATES_POS中随机选取一个句子，在随机一个位置插入你字，返回插入的位置
+# def get_random_data():
+#     # 随机选择一个句子
+#     sentence = random.choice(TEMPLATES_POS)
+
+#     # 随机选择一个插入位置（0 到 len(sentence) 之间，包括末尾）
+#     insert_pos = random.randint(0, len(sentence))
+#     new_sentence = sentence[:insert_pos] + '你' + sentence[insert_pos:]
+#     return new_sentence, insert_pos
+
+CHARS = list("我他天地人心情好坏高低美丑胖瘦早上中午晚上白天")
+
 def get_random_data():
-    # 随机选择一个句子
-    sentence = random.choice(TEMPLATES_POS)
-
-    # 随机选择一个插入位置（0 到 len(sentence) 之间，包括末尾）
-    insert_pos = random.randint(0, len(sentence))
-    new_sentence = sentence[:insert_pos] + '你' + sentence[insert_pos:]
-    return new_sentence, insert_pos
-
+    sent = [random.choice(CHARS) for _ in range(5)]
+    pos = random.randint(0, 4)
+    sent[pos] = '你'
+    return ''.join(sent), pos
 
 def build_dataset(n=N_SAMPLES):
     data = []
@@ -118,10 +125,11 @@ class KeywordRNN(nn.Module):
     def forward(self, x):
         # x: (batch, seq_len)
         e, _ = self.rnn(self.embedding(x))  # (B, L, hidden_dim)
-        pooled = e.max(dim=1)[0]            # (B, hidden_dim)  对序列做 max pooling
-        pooled = self.dropout(self.bn(pooled))
+        #pooled = e.max(dim=1)[0]            # (B, hidden_dim)  对序列做 max pooling
+        #pooled = self.dropout(self.bn(pooled))
         #out = torch.sigmoid(self.fc(pooled).squeeze(1))  # (B,)
-        out = self.fc(pooled)
+        last = e[:, -1, :]
+        out = self.fc(last)
         return out
 
 
@@ -131,7 +139,8 @@ def evaluate(model, loader):
     correct = total = 0
     with torch.no_grad():
         for X, y in loader:
-            pred = torch.argmax(model(X), dim=1)
+            digits = model(X)
+            pred = torch.argmax(digits, dim=1)
             correct += (pred == y.long()).sum().item()
             total   += len(y)
     return correct / total
@@ -176,11 +185,12 @@ def train():
 
     print("\n--- 推理示例 ---")
     model.eval()
+    #我他天地人心情好坏高低美丑胖瘦早上中午晚上白天
     test_sents = [
-        '你想吃薯条',
-        '肚子饿了你',
-        '对你太好了',
-        '她比你高点',
+        '你白天晚上',
+        '天高瘦午你',
+        '坏你我他丑',
+        '人天你胖人',
     ]
     with torch.no_grad():
         for sent in test_sents:
