@@ -5,7 +5,7 @@ import numpy as np
 '''
 利用google bert的预训练模型权重自行实现transformer结果，比对手工结果跟bert结果验证手工编写的是不是对
 
-先手工写一下bert的模型结构
+先手工写一下模型结构
 假设输入4个字  跟老师的一样，便于过程debug分析哪个步骤的结果有问题
 embedding阶段
     第一步：先把数据的内容转embedding，转成768维的向量   形状 4*768       4个字代表4个token 每个token是768维
