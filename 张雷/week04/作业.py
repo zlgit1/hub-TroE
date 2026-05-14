@@ -1,192 +1,205 @@
 import torch
 import torch.nn as nn
 import math
+from transformers import BertModel
 
+bert = BertModel.from_pretrained(r"/Users/zhanglei/projects/llm-bootcamp/week04/bert-base-chinese", return_dict=False)
+state_dict = bert.state_dict()
+bert.eval()
+x = [2450, 15486, 102, 2110] #假想成4个字的句子
+torch_x = torch.LongTensor([x])          #pytorch形式输入
+seqence_output, pooler_output = bert(torch_x)
+print(seqence_output.shape, pooler_output.shape)
+# print(seqence_output, pooler_output)
 
-class BertSelfAttention(nn.Module):
-    """
-    多头自注意力层。将 hidden_size 均分到 num_attention_heads 个头，
-    每个头独立计算缩放点积注意力，最后拼接回 hidden_size。
-    """
-    def __init__(self, hidden_size=768, num_attention_heads=12, dropout=0.1):
-        super().__init__()
-        if hidden_size % num_attention_heads != 0:
-            raise ValueError("hidden_size 必须能被 num_attention_heads 整除")
-        self.num_attention_heads = num_attention_heads
-        self.attention_head_size = hidden_size // num_attention_heads
-        self.all_head_size = num_attention_heads * self.attention_head_size
+# print(bert.state_dict().keys())  #查看所有的权值矩阵名称
 
-        # Q、K、V 投影矩阵
-        self.query = nn.Linear(hidden_size, self.all_head_size)
-        self.key = nn.Linear(hidden_size, self.all_head_size)
-        self.value = nn.Linear(hidden_size, self.all_head_size)
+#gelu激活函数
+def gelu(x):
+    return 0.5 * x * (1 + torch.tanh(math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))))
 
-        # 注意力输出投影矩阵
-        self.output = nn.Linear(hidden_size, self.all_head_size)
-        self.dropout = nn.Dropout(dropout)
+class DiyBert:
+    def __init__(self, state_dict):
+        self.num_attention_heads = 12
+        self.hidden_size = 768
+        self.num_layers = bert.config.num_hidden_layers
+        self.load_weights(state_dict)
+    
+    def load_weights(self, state_dict):
+        #embedding部分
+        self.word_embeddings = state_dict["embeddings.word_embeddings.weight"]
+        self.position_embeddings = state_dict["embeddings.position_embeddings.weight"]
+        self.token_type_embeddings = state_dict["embeddings.token_type_embeddings.weight"]
+        self.embeddings_layer_norm_weight = state_dict["embeddings.LayerNorm.weight"]
+        self.embeddings_layer_norm_bias = state_dict["embeddings.LayerNorm.bias"]
+        self.transformer_weights = []
+        #transformer部分，有多层
+        for i in range(self.num_layers):
+            q_w = state_dict["encoder.layer.%d.attention.self.query.weight" % i]
+            q_b = state_dict["encoder.layer.%d.attention.self.query.bias" % i]
+            k_w = state_dict["encoder.layer.%d.attention.self.key.weight" % i]
+            k_b = state_dict["encoder.layer.%d.attention.self.key.bias" % i]
+            v_w = state_dict["encoder.layer.%d.attention.self.value.weight" % i]
+            v_b = state_dict["encoder.layer.%d.attention.self.value.bias" % i]
+            attention_output_weight = state_dict["encoder.layer.%d.attention.output.dense.weight" % i]
+            attention_output_bias = state_dict["encoder.layer.%d.attention.output.dense.bias" % i]
+            attention_layer_norm_w = state_dict["encoder.layer.%d.attention.output.LayerNorm.weight" % i]
+            attention_layer_norm_b = state_dict["encoder.layer.%d.attention.output.LayerNorm.bias" % i]
+            intermediate_weight = state_dict["encoder.layer.%d.intermediate.dense.weight" % i]
+            intermediate_bias = state_dict["encoder.layer.%d.intermediate.dense.bias" % i]
+            output_weight = state_dict["encoder.layer.%d.output.dense.weight" % i]
+            output_bias = state_dict["encoder.layer.%d.output.dense.bias" % i]
+            ff_layer_norm_w = state_dict["encoder.layer.%d.output.LayerNorm.weight" % i]
+            ff_layer_norm_b = state_dict["encoder.layer.%d.output.LayerNorm.bias" % i]
+            self.transformer_weights.append([q_w, q_b, k_w, k_b, v_w, v_b, attention_output_weight, attention_output_bias,
+                                             attention_layer_norm_w, attention_layer_norm_b, intermediate_weight, intermediate_bias,
+                                             output_weight, output_bias, ff_layer_norm_w, ff_layer_norm_b])
+        #pooler层
+        self.pooler_dense_weight = state_dict["pooler.dense.weight"]
+        self.pooler_dense_bias = state_dict["pooler.dense.bias"]
+    
+    #bert embedding，使用3层叠加，在经过一个Layer norm层
+    def embedding_forward(self, x):
+        # x.shape = [max_len]
+        we = self.get_embedding(self.word_embeddings, x)  # shpae: [max_len, hidden_size]
+        # position embeding的输入 [0, 1, 2, 3]
+        pe = self.get_embedding(self.position_embeddings, list(range(len(x))))  # shpae: [max_len, hidden_size]
+        # token type embedding,单输入的情况下为[0, 0, 0, 0]
+        te = self.get_embedding(self.token_type_embeddings, [0] * len(x))  # shpae: [max_len, hidden_size]
+        embedding = we + pe + te
+        # 加和后有一个归一化层
+        embedding = self.layer_norm(embedding, self.embeddings_layer_norm_weight, self.embeddings_layer_norm_bias)  # shpae: [max_len, hidden_size]
+        return embedding
+    
+    #embedding层实际上相当于按index索引，或理解为onehot输入乘以embedding矩阵
+    def get_embedding(self, embedding_matrix, x):
+        return embedding_matrix[torch.tensor(x)]
 
-    def transpose_for_scores(self, x):
-        """
-        将 [batch, seq_len, hidden_size] 拆成多头形式 [batch, num_heads, seq_len, head_size]
-        每个 batch 样本的 hidden_size 维度被切分成 num_heads 份，便于并行计算各头注意力。
-        """
-        new_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
-        x = x.view(*new_shape)
-        return x.permute(0, 2, 1, 3)
+    #执行全部的transformer层计算
+    def all_transformer_layer_forward(self, x):
+        for i in range(self.num_layers):
+            x = self.single_transformer_layer_forward(x, i)
+        return x
+    
+    #执行单层transformer层计算
+    def single_transformer_layer_forward(self, x, layer_index):
+        weights = self.transformer_weights[layer_index]
+        #取出该层的参数，在实际中，这些参数都是随机初始化，之后进行预训练
+        q_w, q_b, \
+        k_w, k_b, \
+        v_w, v_b, \
+        attention_output_weight, attention_output_bias, \
+        attention_layer_norm_w, attention_layer_norm_b, \
+        intermediate_weight, intermediate_bias, \
+        output_weight, output_bias, \
+        ff_layer_norm_w, ff_layer_norm_b = weights
+        #self attention层
+        attention_output = self.self_attention(x,
+                                q_w, q_b,
+                                k_w, k_b,
+                                v_w, v_b,
+                                attention_output_weight, attention_output_bias,
+                                self.num_attention_heads,
+                                self.hidden_size)
+        #bn层，并使用了残差机制
+        x = self.layer_norm(x + attention_output, attention_layer_norm_w, attention_layer_norm_b)
+        #feed forward层
+        feed_forward_x = self.feed_forward(x,
+                              intermediate_weight, intermediate_bias,
+                              output_weight, output_bias)
+        #bn层，并使用了残差机制
+        x = self.layer_norm(x + feed_forward_x, ff_layer_norm_w, ff_layer_norm_b)
+        return x
+    
+        # self attention的计算
+    
+    def self_attention(self,
+                       x,
+                       q_w,
+                       q_b,
+                       k_w,
+                       k_b,
+                       v_w,
+                       v_b,
+                       attention_output_weight,
+                       attention_output_bias,
+                       num_attention_heads,
+                       hidden_size):
+        # x.shape = max_len * hidden_size
+        # q_w, k_w, v_w  shape = hidden_size * hidden_size
+        # q_b, k_b, v_b  shape = hidden_size
+        # q = np.dot(x, q_w.T) + q_b  # shape: [max_len, hidden_size]      W * X + B lINER
+        # k = np.dot(x, k_w.T) + k_b  # shpae: [max_len, hidden_size]
+        # v = np.dot(x, v_w.T) + v_b  # shpae: [max_len, hidden_size]
+        q = torch.matmul(x, q_w.T) + q_b  # shape: [max_len, hidden_size]
+        k = torch.matmul(x, k_w.T) + k_b  # shpae: [max_len, hidden_size]
+        v = torch.matmul(x, v_w.T) + v_b  # shpae: [max_len, hidden_size]
+        attention_head_size = int(hidden_size / num_attention_heads)
+        # q.shape = num_attention_heads, max_len, attention_head_size
+        q = self.transpose_for_scores(q, attention_head_size, num_attention_heads)
+        # k.shape = num_attention_heads, max_len, attention_head_size
+        k = self.transpose_for_scores(k, attention_head_size, num_attention_heads)
+        # v.shape = num_attention_heads, max_len, attention_head_size
+        v = self.transpose_for_scores(v, attention_head_size, num_attention_heads)
+        # qk.shape = num_attention_heads, max_len, max_len
+        qk = torch.matmul(q, k.transpose(1, 2))
+        qk /= math.sqrt(attention_head_size)
+        qk = torch.softmax(qk, dim=-1)
+        # qkv.shape = num_attention_heads, max_len, attention_head_size
+        qkv = torch.matmul(qk, v)
+        # qkv.shape = max_len, hidden_size
+        qkv = qkv.transpose(0, 1).reshape(-1, hidden_size)
+        # attention.shape = max_len, hidden_size
+        attention = torch.matmul(qkv, attention_output_weight.T) + attention_output_bias
+        return attention
+    
+    #多头机制
+    def transpose_for_scores(self, x, attention_head_size, num_attention_heads):
+        # hidden_size = 768  num_attent_heads = 12 attention_head_size = 64
+        max_len, hidden_size = x.shape
+        x = x.reshape(max_len, num_attention_heads, attention_head_size)
+        x = x.transpose(0, 1)  # output shape = [num_attention_heads, max_len, attention_head_size]
+        return x
+    
+    #前馈网络的计算
+    def feed_forward(self,
+                     x,
+                     intermediate_weight,  # intermediate_size, hidden_size
+                     intermediate_bias,  # intermediate_size
+                     output_weight,  # hidden_size, intermediate_size
+                     output_bias,  # hidden_size
+                     ):
+        # output shpae: [max_len, intermediate_size]
+        x = torch.matmul(x, intermediate_weight.T) + intermediate_bias
+        x = gelu(x)
+        # output shpae: [max_len, hidden_size]
+        x = torch.matmul(x, output_weight.T) + output_bias
+        return x
 
-    def forward(self, hidden_states, attention_mask=None):
-        q = self.transpose_for_scores(self.query(hidden_states))
-        k = self.transpose_for_scores(self.key(hidden_states))
-        v = self.transpose_for_scores(self.value(hidden_states))
+    #归一化层
+    def layer_norm(self, x, w, b):
+        x = (x - torch.mean(x, dim=1, keepdim=True)) / torch.std(x, dim=1, keepdim=True)
+        x = x * w + b
+        return x
 
-        # 缩放点积注意力: softmax(Q @ K^T / sqrt(d_k)) @ V
-        # 除以 sqrt(d_k) 防止点积过大导致 softmax 梯度消失
-        attention_scores = torch.matmul(q, k.transpose(-1, -2)) / math.sqrt(self.attention_head_size)
+    #链接[cls] token的输出层
+    def pooler_output_layer(self, x):
+        x = torch.matmul(x, self.pooler_dense_weight.T) + self.pooler_dense_bias
+        x = torch.tanh(x)
+        return x
 
-        if attention_mask is not None:
-            # mask 位置加上一个很大的负数，经过 softmax 后权重趋近于 0
-            attention_scores = attention_scores + attention_mask
-
-        attention_probs = torch.softmax(attention_scores, dim=-1)
-        attention_probs = self.dropout(attention_probs)
-
-        context = torch.matmul(attention_probs, v)
-
-        # 恢复为 [batch, seq_len, hidden_size]：先调回 batch-first，再拼接所有头
-        context = context.permute(0, 2, 1, 3).contiguous()
-        context = context.view(context.size(0), -1, self.all_head_size)
-
-        return self.output(context)
-
-
-class BertFeedForward(nn.Module):
-    """前馈网络: linear(4h) -> GELU -> linear(h) -> dropout"""
-    def __init__(self, hidden_size=768, intermediate_size=3072, dropout=0.1):
-        super().__init__()
-        self.dense1 = nn.Linear(hidden_size, intermediate_size)
-        self.dense2 = nn.Linear(intermediate_size, hidden_size)
-        self.dropout = nn.Dropout(dropout)
-
-    def gelu(self, x):
-        """GELU 激活函数的 tanh 近似形式，与原始 BERT 一致"""
-        return 0.5 * x * (1 + torch.tanh(
-            math.sqrt(2 / math.pi) * (x + 0.044715 * torch.pow(x, 3))
-        ))
-
+    #最终输出
     def forward(self, x):
-        x = self.gelu(self.dense1(x))
-        x = self.dropout(self.dense2(x))
-        return x
+        x = self.embedding_forward(x)
+        sequence_output = self.all_transformer_layer_forward(x)
+        pooler_output = self.pooler_output_layer(sequence_output[0])
+        return sequence_output, pooler_output
 
+#自制
+db = DiyBert(state_dict)
+diy_sequence_output, diy_pooler_output = db.forward(x)
+#torch
+torch_sequence_output, torch_pooler_output = bert(torch_x)
 
-class BertTransformerLayer(nn.Module):
-    """
-    单层 BERT Transformer（Post-LN 结构）:
-      x = LayerNorm(x + Dropout(Attention(x)))
-      x = LayerNorm(x + Dropout(FFN(x)))
-    残差连接解决深层网络退化问题，LayerNorm 放在残差之后（post-norm）稳定训练。
-    """
-    def __init__(self, hidden_size=768, num_attention_heads=12, intermediate_size=3072, dropout=0.1):
-        super().__init__()
-        self.attention = BertSelfAttention(hidden_size, num_attention_heads, dropout)
-        self.attention_layer_norm = nn.LayerNorm(hidden_size, eps=1e-12)
-        self.feed_forward = BertFeedForward(hidden_size, intermediate_size, dropout)
-        self.ffn_layer_norm = nn.LayerNorm(hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, x, attention_mask=None):
-        attention_output = self.attention(x, attention_mask)
-        x = self.attention_layer_norm(x + self.dropout(attention_output))
-
-        ffn_output = self.feed_forward(x)
-        x = self.ffn_layer_norm(x + self.dropout(ffn_output))
-
-        return x
-
-
-class BertEmbeddings(nn.Module):
-    """
-    三种嵌入求和: word + position + token_type，后接 LayerNorm + Dropout。
-    position embedding 从 0 开始编号，token_type 默认全 0（单句场景）。
-    """
-    def __init__(self, vocab_size=21128, hidden_size=768, max_position_embeddings=512,
-                 type_vocab_size=2, dropout=0.1):
-        super().__init__()
-        self.word_embeddings = nn.Embedding(vocab_size, hidden_size, padding_idx=0)
-        self.position_embeddings = nn.Embedding(max_position_embeddings, hidden_size)
-        self.token_type_embeddings = nn.Embedding(type_vocab_size, hidden_size)
-        self.layer_norm = nn.LayerNorm(hidden_size, eps=1e-12)
-        self.dropout = nn.Dropout(dropout)
-
-    def forward(self, input_ids, token_type_ids=None):
-        seq_length = input_ids.size(1)
-        position_ids = torch.arange(seq_length, dtype=torch.long, device=input_ids.device)
-        position_ids = position_ids.unsqueeze(0).expand_as(input_ids)
-
-        if token_type_ids is None:
-            token_type_ids = torch.zeros_like(input_ids)
-
-        word_emb = self.word_embeddings(input_ids)
-        pos_emb = self.position_embeddings(position_ids)
-        type_emb = self.token_type_embeddings(token_type_ids)
-
-        embeddings = self.layer_norm(word_emb + pos_emb + type_emb)
-        embeddings = self.dropout(embeddings)
-        return embeddings
-
-
-class DiyBertModel(nn.Module):
-    """简易 BERT 模型：embedding -> N 层 transformer -> pooler"""
-    def __init__(self, vocab_size=21128, hidden_size=768, num_layers=12,
-                 num_attention_heads=12, intermediate_size=3072,
-                 max_position_embeddings=512, dropout=0.1):
-        super().__init__()
-        self.embeddings = BertEmbeddings(vocab_size, hidden_size, max_position_embeddings,
-                                         dropout=dropout)
-        self.layers = nn.ModuleList([
-            BertTransformerLayer(hidden_size, num_attention_heads, intermediate_size, dropout)
-            for _ in range(num_layers)
-        ])
-        self.pooler = nn.Sequential(
-            nn.Linear(hidden_size, hidden_size),
-            nn.Tanh()
-        )
-
-    def forward(self, input_ids, token_type_ids=None, attention_mask=None):
-        # 将 [batch, seq_len] 的 0/1 mask 扩展为 [batch, 1, 1, seq_len]，
-        # 并转为 additive mask: 1 -> 0 (保留), 0 -> -10000 (屏蔽)
-        extended_attention_mask = None
-        if attention_mask is not None:
-            extended_attention_mask = attention_mask[:, None, None, :].float()
-            extended_attention_mask = (1.0 - extended_attention_mask) * -10000.0
-
-        x = self.embeddings(input_ids, token_type_ids)
-
-        for layer in self.layers:
-            x = layer(x, extended_attention_mask)
-
-        # 取 [CLS] 位置（第一个 token）的输出做池化
-        pooled_output = self.pooler(x[:, 0])
-        return x, pooled_output
-
-
-if __name__ == "__main__":
-    model = DiyBertModel(
-        vocab_size=21128,
-        hidden_size=768,
-        num_layers=1,
-        num_attention_heads=12,
-        intermediate_size=3072,
-    )
-
-    input_ids = torch.randint(0, 21128, (2, 10))
-    attention_mask = torch.ones(2, 10)
-
-    model.eval()
-    with torch.no_grad():
-        sequence_output, pooled_output = model(input_ids, attention_mask=attention_mask)
-
-    print(f"输入 shape: {input_ids.shape}")          # [2, 10]
-    print(f"序列输出 shape: {sequence_output.shape}")  # [2, 10, 768]
-    print(f"池化输出 shape: {pooled_output.shape}")    # [2, 768]
-    print(f"模型参数量: {sum(p.numel() for p in model.parameters()):,}")
+print(diy_sequence_output)
+print(torch_sequence_output)
