@@ -1,20 +1,3 @@
-"""
-用 PyTorch 从零实现一个 Transformer 编码器层(Encoder Layer)。
-
-Transformer 出自论文 "Attention Is All You Need" (Vaswani et al., 2017)。
-它的核心思想:抛弃 RNN 的顺序计算,完全使用 注意力机制(Attention) 来建模序列中
-任意两个位置之间的依赖关系,从而实现并行计算 + 长距离依赖。
-
-一个完整的 Encoder Layer 由两个子层(sub-layer)组成:
-    1. Multi-Head Self-Attention   多头自注意力
-    2. Position-wise Feed-Forward  位置前馈网络
-
-每个子层外面都套了:
-    残差连接(Residual)  +  层归一化(LayerNorm)
-即:  output = LayerNorm(x + Sublayer(x))   (Post-LN 写法)
-
-下面的代码会逐步实现这些组件,并在注释里解释"为什么这样写"。
-"""
 
 import os
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
@@ -24,15 +7,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
-# ---------------------------------------------------------------------------
-# 1. 缩放点积注意力 (Scaled Dot-Product Attention)
-# ---------------------------------------------------------------------------
-# 注意力的本质是:对一组 Value 做加权平均,权重由 Query 和 Key 的相似度决定。
-# 公式:  Attention(Q, K, V) = softmax( Q · K^T / sqrt(d_k) ) · V
-#
-# 为什么要除以 sqrt(d_k)?
-#   当 d_k 较大时,Q·K^T 的方差会变大,使 softmax 进入梯度极小的饱和区,
-#   除以 sqrt(d_k) 可以把方差拉回 1 附近,稳定训练。
 def scaled_dot_product_attention(q, k, v, mask=None):
     """
     q, k, v 形状:  (batch, num_heads, seq_len, d_k)
@@ -62,14 +36,7 @@ def scaled_dot_product_attention(q, k, v, mask=None):
 # ---------------------------------------------------------------------------
 # 2. 多头注意力 (Multi-Head Attention)
 # ---------------------------------------------------------------------------
-# 为什么需要"多头"?
-#   单个注意力只能学到一种"关注模式"(比如只关注主谓关系)。
-#   多头让模型在不同的子空间里并行学习多种关系
-#   (语法关系、指代关系、长距离依赖等),最后再拼接起来。
-#
-# 实现技巧:
-#   不必真的造 h 个独立的小矩阵,只需用一个大的线性层把 d_model 投影到 d_model,
-#   然后 reshape 成 (batch, num_heads, seq, d_k) 即可,数学上完全等价、且更快。
+
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1):
         super().__init__()
@@ -123,16 +90,7 @@ class MultiHeadAttention(nn.Module):
 # ---------------------------------------------------------------------------
 # 3. 位置前馈网络 (Position-wise Feed-Forward Network, FFN)
 # ---------------------------------------------------------------------------
-# 结构很简单:两层全连接 + 一个非线性激活。
-#   FFN(x) = max(0, x W1 + b1) W2 + b2     (原论文用 ReLU,后续多用 GELU)
-#
-# 为什么叫 "Position-wise"?
-#   它对序列中每一个位置(token)独立地、用同样的参数做变换,不跨位置交互。
-#   跨位置的信息交互完全交给前面的 Self-Attention 来完成。
-#
-# 为什么中间维度 d_ff 通常是 d_model 的 4 倍?
-#   注意力层主要负责"挑选信息",FFN 负责"加工信息",
-#   更宽的中间层提供更强的非线性表达能力,这是经验性的最优配置。
+
 class PositionwiseFeedForward(nn.Module):
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1):
         super().__init__()
@@ -149,20 +107,7 @@ class PositionwiseFeedForward(nn.Module):
 # ---------------------------------------------------------------------------
 # 4. Transformer Encoder Layer
 # ---------------------------------------------------------------------------
-# 把上面的组件组装起来,并加上"残差连接 + LayerNorm"。
-#
-# 残差连接 (Residual): output = x + Sublayer(x)
-#   - 缓解深层网络的梯度消失,让信息可以"跳过"子层直接向后传。
-#
-# 层归一化 (LayerNorm): 对每个 token 的特征维做归一化
-#   - 不依赖 batch 大小,适合变长序列;BatchNorm 在 NLP 里效果不好。
-#
-# 关于 Pre-LN vs Post-LN:
-#   - 原论文是 Post-LN: y = LayerNorm(x + Sublayer(x))
-#   - 现代实现(GPT/BERT 多数变体)更常用 Pre-LN:
-#         y = x + Sublayer(LayerNorm(x))
-#     Pre-LN 训练更稳定,可以不用学习率 warmup,深层模型也不容易发散。
-#   下面采用 Pre-LN。
+
 class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
